@@ -26,8 +26,9 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# copy assets
+# copy assets (copy contents, not the directory itself)
 if (Test-Path "$PROJECT\animal") {
+    if (Test-Path "$DIST\animal") { Remove-Item -Recurse -Force "$DIST\animal" }
     Copy-Item -Recurse "$PROJECT\animal" "$DIST\animal"
     Write-Host "[OK] Assets copied" -ForegroundColor Green
 }

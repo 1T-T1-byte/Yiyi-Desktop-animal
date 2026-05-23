@@ -63,6 +63,7 @@ const wchar_t* STATE_FILENAMES[] = {
     L"\u5199\u65E5\u8BB0.png",  // 写日记
     L"\u751F\u6C14.png",        // 生气
 };
+constexpr int BASE_STATE_COUNT = 5;
 
 // 新格式: 吃东西基础姿势
 const wchar_t* EATING_BASE_FILENAME = L"\u5403\u4E1C\u897F.png"; // 吃东西.png
@@ -105,6 +106,7 @@ struct StateResource {
     HDC     hdc = NULL;
     HBITMAP hBmp = NULL;
     HBITMAP hOldBmp = NULL;
+    void*   pBits = NULL;   // 32-bit ARGB 像素数据指针
 };
 
 // =============================================================================
@@ -131,6 +133,20 @@ std::wstring    g_exeDir;
 float g_foodPosX = DEFAULT_FOOD_POS_X;
 float g_foodPosY = DEFAULT_FOOD_POS_Y;
 float g_foodSize = DEFAULT_FOOD_SIZE;
+
+// =============================================================================
+//  饱食条 & 心情条
+// =============================================================================
+constexpr int MAX_HUNGER    = 10;
+constexpr int MAX_MOOD      = 10;
+constexpr int TIMER_STATUS  = 3;           // 状态刷新定时器 ID
+constexpr int STATUS_TICK   = 5000;        // 状态 tick 间隔 (5s)
+constexpr int HUNGER_TICK   = 12;          // 12 tick = 60s ↓2 饱食
+constexpr int MOOD_DEC_TICK = 6;           // 6  tick = 30s ↓1 心情
+
+int g_hunger = MAX_HUNGER;
+int g_mood   = MAX_MOOD;
+int g_statusTick = 0;
 
 // =============================================================================
 //  辅助函数
@@ -197,6 +213,7 @@ bool LoadImageToResource(const std::wstring& fullPath, StateResource& res) {
     void* pBits = NULL;
     res.hBmp = CreateDIBSection(res.hdc, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
     res.hOldBmp = (HBITMAP)SelectObject(res.hdc, res.hBmp);
+    res.pBits = pBits;  // 保存像素指针
 
     Graphics g(res.hdc);
     g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
@@ -226,6 +243,7 @@ bool CompositeEatingFrame(Image* baseImg, Image* foodImg, StateResource& res) {
     void* pBits = NULL;
     res.hBmp = CreateDIBSection(res.hdc, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
     res.hOldBmp = (HBITMAP)SelectObject(res.hdc, res.hBmp);
+    res.pBits = pBits;
 
     // 1) 画基础吃东西姿势 (全幅)
     Graphics g(res.hdc);
@@ -306,7 +324,7 @@ bool LoadSkin(int idx) {
     const SkinInfo& skin = g_skins[idx];
 
     // ---- 加载 5 种基础状态 ----
-    for (int i = 0; i < STATE_COUNT; i++) {
+    for (int i = 0; i < BASE_STATE_COUNT; i++) {
         std::wstring fp = skin.path + L"\\" + STATE_FILENAMES[i];
         if (!LoadImageToResource(fp, g_stateRes[i])) {
             wchar_t msg[512];
@@ -420,35 +438,114 @@ bool LoadSkin(int idx) {
 }
 
 // =============================================================================
-//  更新窗口图片
+//  更新窗口图片（带饱食/心情状态条）
 // =============================================================================
 void UpdatePetWindow() {
-    HDC hdcSrc = NULL;
+    // 获取源 DIB 数据
+    void* srcBits = NULL;
+    HDC   hdcSrc  = NULL;
 
     if (g_currentState == STATE_EATING) {
-        if (g_eatingIndex >= 0 && g_eatingIndex < (int)g_eatingRes.size())
+        if (g_eatingIndex >= 0 && g_eatingIndex < (int)g_eatingRes.size()) {
             hdcSrc = g_eatingRes[g_eatingIndex].hdc;
+            srcBits = g_eatingRes[g_eatingIndex].pBits;
+        }
     } else {
         hdcSrc = g_stateRes[g_currentState].hdc;
+        srcBits = g_stateRes[g_currentState].pBits;
     }
 
-    if (!hdcSrc) return;
+    if (!hdcSrc || !srcBits) return;
 
+    // ---- 创建临时帧缓冲 ----
+    HDC hdcFrame = CreateCompatibleDC(NULL);
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = DISPLAY_SIZE;
+    bmi.bmiHeader.biHeight      = -DISPLAY_SIZE;
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* frameBits = NULL;
+    HBITMAP hBmpFrame = CreateDIBSection(hdcFrame, &bmi, DIB_RGB_COLORS, &frameBits, NULL, 0);
+    HGDIOBJ hOldFrame = SelectObject(hdcFrame, hBmpFrame);
+
+    // 复制源像素
+    memcpy(frameBits, srcBits, DISPLAY_SIZE * DISPLAY_SIZE * 4);
+
+    // ---- 绘制状态条 ----
+    {
+        Graphics g(hdcFrame);
+        g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+
+        const int barW = 52, barH = 6, gap = 4;
+        int bx = DISPLAY_SIZE - barW - 6;
+        int by = DISPLAY_SIZE - 24;
+
+        // 背景 (半透明黑)
+        SolidBrush bgBrush(Color(90, 0, 0, 0));
+        g.FillRectangle(&bgBrush, bx - 2, by - 2, barW + 4, barH + gap + barH + 8);
+
+        // 心情条
+        {
+            SolidBrush barBg(Color(60, 60, 60, 60));
+            g.FillRectangle(&barBg, bx, by, barW, barH);
+            int fillW = (barW * g_mood) / MAX_MOOD;
+            Color mc = (g_mood > 5) ? Color(220, 60, 210, 70) : Color(220, 220, 60, 60);
+            SolidBrush moodBrush(mc);
+            g.FillRectangle(&moodBrush, bx, by, fillW, barH);
+        }
+
+        // 饱食条
+        {
+            int hy = by + barH + gap;
+            SolidBrush barBg(Color(60, 60, 60, 60));
+            g.FillRectangle(&barBg, bx, hy, barW, barH);
+            int fillW = (barW * g_hunger) / MAX_HUNGER;
+            Color hc = (g_hunger > 5) ? Color(220, 60, 200, 60) : Color(220, 210, 170, 50);
+            SolidBrush hungBrush(hc);
+            g.FillRectangle(&hungBrush, bx, hy, fillW, barH);
+        }
+    }
+
+    // ---- 更新窗口 ----
     BLENDFUNCTION blend = {};
     blend.BlendOp             = AC_SRC_OVER;
     blend.BlendFlags          = 0;
     blend.SourceConstantAlpha = 255;
     blend.AlphaFormat         = AC_SRC_ALPHA;
 
-    POINT ptSrc   = {0, 0};
+    POINT ptSrc = {0, 0};
     SIZE  sizeDst = {DISPLAY_SIZE, DISPLAY_SIZE};
-
     RECT rect;
     GetWindowRect(g_hwnd, &rect);
     POINT ptDst = {rect.left, rect.top};
 
     UpdateLayeredWindow(g_hwnd, NULL, &ptDst, &sizeDst,
-                        hdcSrc, &ptSrc, 0, &blend, ULW_ALPHA);
+                        hdcFrame, &ptSrc, 0, &blend, ULW_ALPHA);
+
+    // 清理
+    SelectObject(hdcFrame, hOldFrame);
+    DeleteObject(hBmpFrame);
+    DeleteDC(hdcFrame);
+}
+
+// =============================================================================
+//  心情检测 → 自动切换状态
+// =============================================================================
+void CheckMoodHunger() {
+    // 只在基础状态（开心/生气）下才自动切换
+    if (g_currentState != STATE_IDLE && g_currentState != STATE_ANGRY) return;
+
+    PetState target = (g_mood > 5) ? STATE_IDLE : STATE_ANGRY;
+    if (target != g_currentState) {
+        g_currentState = target;
+        g_eatingIndex = 0;
+        KillTimer(g_hwnd, TIMER_EATING);
+        KillTimer(g_hwnd, TIMER_STATE);
+        SetTimer(g_hwnd, TIMER_STATE, STATE_INTERVAL, NULL);
+        UpdatePetWindow();
+    }
 }
 
 // =============================================================================
@@ -460,6 +557,11 @@ void SwitchToState(PetState newState) {
 
     KillTimer(g_hwnd, TIMER_EATING);
     KillTimer(g_hwnd, TIMER_STATE);
+
+    // 活动增加心情
+    if (newState == STATE_PLAYING || newState == STATE_DRAWING) {
+        g_mood = (g_mood + 1 > MAX_MOOD) ? MAX_MOOD : (g_mood + 1);
+    }
 
     if (newState == STATE_EATING) {
         SetTimer(g_hwnd, TIMER_EATING, EATING_INTERVAL, NULL);
@@ -483,7 +585,12 @@ void FeedFood(int foodIndex) {
     g_eatingIndex = foodIndex;
 
     KillTimer(g_hwnd, TIMER_STATE);
-    SetTimer(g_hwnd, TIMER_EATING, EATING_INTERVAL, NULL);
+    KillTimer(g_hwnd, TIMER_EATING);  // 手动投喂不循环
+
+    // 增加数值
+    g_hunger = (g_hunger + 2 > MAX_HUNGER) ? MAX_HUNGER : (g_hunger + 2);
+    g_mood   = (g_mood + 2 > MAX_MOOD)    ? MAX_MOOD   : (g_mood + 2);
+
     UpdatePetWindow();
 }
 
@@ -502,6 +609,15 @@ bool SwitchToSkin(int idx) {
 // =============================================================================
 void ShowContextMenu(HWND hwnd, int x, int y) {
     HMENU hMenu = CreatePopupMenu();
+
+    // === 状态显示 ===
+    {
+        wchar_t statusText[64];
+        wsprintfW(statusText, L"\u2764 \u5FC3\u60C5: %d/10    \u2603 \u9971\u98DF: %d/10",
+                  g_mood, g_hunger);
+        AppendMenuW(hMenu, MF_STRING | MF_GRAYED, 0, statusText);
+        AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    }
 
     // === 皮肤选择 ===
     if (!g_skins.empty()) {
@@ -582,6 +698,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             PostQuitMessage(1);
             return -1;
         }
+
+        // 初始化数值
+        g_hunger = MAX_HUNGER;
+        g_mood   = MAX_MOOD;
+        g_statusTick = 0;
+
+        // 启动状态刷新定时器
+        SetTimer(hwnd, TIMER_STATUS, STATUS_TICK, NULL);
 
         // 初始状态: 开心
         SwitchToState(STATE_IDLE);
@@ -681,8 +805,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_TIMER: {
+        if (wParam == TIMER_STATUS) {
+            // 状态刷新 tick
+            g_statusTick++;
+
+            // 饱食下降：12 tick = 60s
+            if (g_statusTick % HUNGER_TICK == 0) {
+                g_hunger = (g_hunger - 2 < 0) ? 0 : (g_hunger - 2);
+            }
+
+            // 心情下降：6 tick = 30s
+            if (g_statusTick % MOOD_DEC_TICK == 0) {
+                g_mood = (g_mood - 1 < 0) ? 0 : (g_mood - 1);
+            }
+
+            // 检测自动切换
+            CheckMoodHunger();
+            return 0;
+        }
+
         if (wParam == TIMER_EATING && g_currentState == STATE_EATING) {
-            // 循环切换食物
+            // 循环切换食物（仅随机状态进入吃东西时）
             g_eatingIndex = (g_eatingIndex + 1) % (int)g_eatingRes.size();
             UpdatePetWindow();
         } else if (wParam == TIMER_STATE) {
@@ -694,6 +837,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_DESTROY: {
         KillTimer(hwnd, TIMER_STATE);
         KillTimer(hwnd, TIMER_EATING);
+        KillTimer(hwnd, TIMER_STATUS);
         FreeAllResources();
         PostQuitMessage(0);
         return 0;
@@ -711,6 +855,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                     PWSTR pCmdLine, int nCmdShow) {
     // 初始化 GDI+
     GdiplusStartupInput gdiplusStartupInput;
+    ZeroMemory(&gdiplusStartupInput, sizeof(gdiplusStartupInput));
+    gdiplusStartupInput.GdiplusVersion = 1;
     ULONG_PTR gdiplusToken;
     if (GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL) != Ok) {
         MessageBoxW(NULL, L"GDI+ init failed", L"Error", MB_ICONERROR);
