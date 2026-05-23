@@ -383,6 +383,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                      screenH - DISPLAY_SIZE - 100,
                      DISPLAY_SIZE, DISPLAY_SIZE,
                      SWP_NOZORDER | SWP_NOACTIVATE);
+
+        // 窗口移动到正确位置后，刷新逐像素透明内容
+        UpdatePetWindow();
         return 0;
     }
 
@@ -527,7 +530,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 1;
     }
 
-    SetLayeredWindowAttributes(hwnd, 0, 0, LWA_COLORKEY);
     ShowWindow(hwnd, nCmdShow);
 
     MSG msg = {};

@@ -32,6 +32,16 @@ if (Test-Path "$PROJECT\animal") {
     Write-Host "[OK] Assets copied" -ForegroundColor Green
 }
 
+# copy MinGW DLLs
+$MINGW_DLLS = @("libwinpthread-1.dll")
+foreach ($dll in $MINGW_DLLS) {
+    $src = "$MINGW_BIN\$dll"
+    if (Test-Path $src) {
+        Copy-Item $src "$DIST\$dll" -Force
+        Write-Host "[OK] $dll copied" -ForegroundColor Green
+    }
+}
+
 # show result
 $info = Get-Item $EXE
 Write-Host "[OK] $EXE ($([math]::Round($info.Length/1KB,1)) KB)" -ForegroundColor Green

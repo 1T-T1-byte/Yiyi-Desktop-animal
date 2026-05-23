@@ -66,6 +66,13 @@ if exist "%PROJECT_DIR%\animal" (
     echo [WARN] Asset directory not found: %PROJECT_DIR%\animal
 )
 
+REM 复制 MinGW DLL
+if exist "%MINGW_DIR%\bin\libwinpthread-1.dll" (
+    echo [COPY] Copying libwinpthread-1.dll...
+    copy /y "%MINGW_DIR%\bin\libwinpthread-1.dll" "%OUTPUT_DIR%\libwinpthread-1.dll" >nul
+    echo [OK] libwinpthread-1.dll copied
+)
+
 REM 输出结果
 for %%F in ("%EXE_PATH%") do set "SIZE=%%~zF"
 set /a "SIZE_KB=%SIZE% / 1024"
