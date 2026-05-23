@@ -28,14 +28,14 @@ using namespace Gdiplus;
 //  常量
 // =============================================================================
 constexpr int DISPLAY_SIZE    = 200;
-constexpr int STATE_INTERVAL  = 4000;   // 普通状态自动切换间隔 (ms)
-constexpr int EATING_INTERVAL = 500;    // 吃东西食物切换间隔 (ms)
-constexpr int TIMER_STATE     = 1;
-constexpr int TIMER_EATING    = 2;
+constexpr int TIMER_STATUS    = 3;        // 状态刷新定时器 ID
+constexpr int STATUS_TICK     = 5000;     // 状态 tick 间隔 (5s)
+constexpr int HUNGER_TICK     = 12;       // 12 tick = 60s ↓2 饱食
+constexpr int MOOD_DEC_TICK   = 6;        // 6  tick = 30s ↓1 心情
 
-constexpr int MENU_SKIN_BASE  = 2000;   // 皮肤切换菜单起始 ID
-constexpr int MENU_STATE_BASE = 1000;   // 状态切换菜单起始 ID
-constexpr int MENU_FOOD_BASE  = 3000;   // 食物投喂菜单起始 ID
+constexpr int MENU_SKIN_BASE  = 2000;     // 皮肤切换菜单起始 ID
+constexpr int MENU_STATE_BASE = 1000;     // 状态切换菜单起始 ID
+constexpr int MENU_FOOD_BASE  = 3000;     // 食物投喂菜单起始 ID
 
 // 食物合成默认位置 (占 DISPLAY_SIZE 的百分比)
 constexpr float DEFAULT_FOOD_POS_X = 0.55f;
@@ -139,10 +139,6 @@ float g_foodSize = DEFAULT_FOOD_SIZE;
 // =============================================================================
 constexpr int MAX_HUNGER    = 10;
 constexpr int MAX_MOOD      = 10;
-constexpr int TIMER_STATUS  = 3;           // 状态刷新定时器 ID
-constexpr int STATUS_TICK   = 5000;        // 状态 tick 间隔 (5s)
-constexpr int HUNGER_TICK   = 12;          // 12 tick = 60s ↓2 饱食
-constexpr int MOOD_DEC_TICK = 6;           // 6  tick = 30s ↓1 心情
 
 int g_hunger = MAX_HUNGER;
 int g_mood   = MAX_MOOD;
@@ -531,19 +527,15 @@ void UpdatePetWindow() {
 }
 
 // =============================================================================
-//  心情检测 → 自动切换状态
+//  心情检测 → 自动切换状态（吃东西时除外）
 // =============================================================================
 void CheckMoodHunger() {
-    // 只在基础状态（开心/生气）下才自动切换
-    if (g_currentState != STATE_IDLE && g_currentState != STATE_ANGRY) return;
+    if (g_currentState == STATE_EATING) return;
 
     PetState target = (g_mood > 5) ? STATE_IDLE : STATE_ANGRY;
     if (target != g_currentState) {
         g_currentState = target;
         g_eatingIndex = 0;
-        KillTimer(g_hwnd, TIMER_EATING);
-        KillTimer(g_hwnd, TIMER_STATE);
-        SetTimer(g_hwnd, TIMER_STATE, STATE_INTERVAL, NULL);
         UpdatePetWindow();
     }
 }
@@ -555,27 +547,12 @@ void SwitchToState(PetState newState) {
     g_currentState = newState;
     g_eatingIndex  = 0;
 
-    KillTimer(g_hwnd, TIMER_EATING);
-    KillTimer(g_hwnd, TIMER_STATE);
-
     // 活动增加心情
     if (newState == STATE_PLAYING || newState == STATE_DRAWING) {
         g_mood = (g_mood + 1 > MAX_MOOD) ? MAX_MOOD : (g_mood + 1);
     }
 
-    if (newState == STATE_EATING) {
-        SetTimer(g_hwnd, TIMER_EATING, EATING_INTERVAL, NULL);
-    } else {
-        SetTimer(g_hwnd, TIMER_STATE, STATE_INTERVAL, NULL);
-    }
-
     UpdatePetWindow();
-}
-
-void SwitchToRandomState(bool includeEating = true) {
-    int maxState = includeEating ? STATE_COUNT : (STATE_COUNT - 1);
-    int r = rand() % maxState;
-    SwitchToState((PetState)r);
 }
 
 // 投喂指定食物
@@ -583,9 +560,6 @@ void FeedFood(int foodIndex) {
     if (foodIndex < 0 || foodIndex >= (int)g_eatingRes.size()) return;
     g_currentState = STATE_EATING;
     g_eatingIndex = foodIndex;
-
-    KillTimer(g_hwnd, TIMER_STATE);
-    KillTimer(g_hwnd, TIMER_EATING);  // 手动投喂不循环
 
     // 增加数值
     g_hunger = (g_hunger + 2 > MAX_HUNGER) ? MAX_HUNGER : (g_hunger + 2);
@@ -752,7 +726,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int dx = abs(pt.x - g_dragOffset.x);
             int dy = abs(pt.y - g_dragOffset.y);
             if (dx < 5 && dy < 5) {
-                SwitchToRandomState(true);
+                // 点击切换下一个非吃东西状态
+                PetState next = (PetState)((g_currentState + 1) % (STATE_COUNT - 1));
+                SwitchToState(next);
             }
         }
         return 0;
@@ -821,22 +797,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             // 检测自动切换
             CheckMoodHunger();
+            UpdatePetWindow();  // 刷新状态条显示
             return 0;
         }
 
-        if (wParam == TIMER_EATING && g_currentState == STATE_EATING) {
-            // 循环切换食物（仅随机状态进入吃东西时）
-            g_eatingIndex = (g_eatingIndex + 1) % (int)g_eatingRes.size();
-            UpdatePetWindow();
-        } else if (wParam == TIMER_STATE) {
-            SwitchToRandomState(true);
-        }
         return 0;
     }
 
     case WM_DESTROY: {
-        KillTimer(hwnd, TIMER_STATE);
-        KillTimer(hwnd, TIMER_EATING);
         KillTimer(hwnd, TIMER_STATUS);
         FreeAllResources();
         PostQuitMessage(0);
