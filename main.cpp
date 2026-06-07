@@ -195,6 +195,26 @@ bool LoadImageToResource(const std::wstring& fullPath, StateResource& res) {
     g.DrawImage(pImage, 0, 0, DISPLAY_SIZE, DISPLAY_SIZE);
 
     delete pImage;
+
+    // 关键修复：GDI+ DrawImage 写入 DIB Section 的像素是非预乘 ARGB，
+    // 但 UpdateLayeredWindow(AC_SRC_ALPHA) 期望预乘格式。
+    // 必须手动预乘：R=R*A/255, G=G*A/255, B=B*A/255
+    if (res.pBits) {
+        BYTE* pixels = (BYTE*)res.pBits;
+        for (int i = 0; i < DISPLAY_SIZE * DISPLAY_SIZE; i++) {
+            BYTE* px = pixels + i * 4;
+            BYTE a = px[3];          // Alpha 通道（byte 3 在 BGRX 布局中）
+            if (a == 0) {
+                px[0] = 0; px[1] = 0; px[2] = 0;  // 完全透明 → RGB 也归零
+            } else {
+                px[0] = (BYTE)((px[0] * a + 128) / 255);  // B
+                px[1] = (BYTE)((px[1] * a + 128) / 255);  // G
+                px[2] = (BYTE)((px[2] * a + 128) / 255);  // R
+                // Alpha 保持不变
+            }
+        }
+    }
+
     return true;
 }
 
@@ -556,6 +576,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         UpdatePetWindow();
         return 0;
+    }
+
+    case WM_NCHITTEST: {
+        // 穿透点击：检查鼠标位置下对应像素的 alpha 值
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(hwnd, &pt);
+        int x = pt.x;
+        int y = pt.y;
+        if (x >= 0 && x < DISPLAY_SIZE && y >= 0 && y < DISPLAY_SIZE) {
+            StateResource& res = g_stateRes[g_currentState];
+            if (res.pBits) {
+                // 32-bit ARGB, 每像素4字节
+                DWORD* pixels = (DWORD*)res.pBits;
+                DWORD pixel = pixels[y * DISPLAY_SIZE + x];
+                BYTE alpha = (pixel >> 24) & 0xFF;
+                // alpha < 40 视为透明，穿透点击到下层窗口
+                if (alpha < 40) {
+                    return HTTRANSPARENT;
+                }
+            }
+        }
+        return HTCLIENT;
     }
 
     case WM_LBUTTONDOWN: {
